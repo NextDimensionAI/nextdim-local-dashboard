@@ -1,0 +1,59 @@
+#!/bin/sh
+# Opens the dekit console for the local stack and stops every task when the
+# console exits for any reason: q, detach (d), Ctrl-C, or closing the window.
+# Before that, it makes sure both gcloud logins the stack needs are valid and
+# clears processes an earlier run left holding the stack's ports.
+cd "$(dirname "$0")" || exit 1
+
+STACK_PORTS="3000 4040 5180 5434 5436 8080 8082 8091 9000 9001 9090 9100"
+STACK_CMDS="uvicorn|unified_voice_agent|watchfiles|cloud-sql-proxy|ngrok|next-server|next dev|npm run dev|make run-|vite"
+
+ensure_login() {
+  label=$1 check=$2 login=$3
+  if sh -c "$check" </dev/null >/dev/null 2>&1; then
+    echo "gcloud: $label OK"
+    return 0
+  fi
+  echo "gcloud: $label expired or missing — running: $login"
+  sh -c "$login" || { echo "gcloud: $label login failed; not starting the stack."; exit 1; }
+  sh -c "$check" </dev/null >/dev/null 2>&1 || { echo "gcloud: $label still not valid; not starting the stack."; exit 1; }
+  echo "gcloud: $label OK"
+}
+
+# Leftovers only exist when no runner owns the stack; attaching to a live one must not kill it.
+clear_leftovers() {
+  pgrep -f "dekit runner run --dir $PWD" >/dev/null && return 0
+  found=0
+  for port in $STACK_PORTS; do
+    for pid in $(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
+      cmd=$(ps -o command= -p "$pid")
+      if ! echo "$cmd" | grep -Eq "$STACK_CMDS"; then
+        echo "port $port: held by a non-stack process ($pid), leaving it"
+        continue
+      fi
+      pgid=$(ps -o pgid= -p "$pid" | tr -d ' ')
+      echo "port $port: stopping leftover process group $pgid ($(echo "$cmd" | cut -c1-60))"
+      kill -TERM -"$pgid" 2>/dev/null
+      found=1
+    done
+  done
+  [ "$found" = 1 ] || return 0
+  sleep 3
+  for port in $STACK_PORTS; do
+    for pid in $(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
+      ps -o command= -p "$pid" | grep -Eq "$STACK_CMDS" && kill -KILL -"$(ps -o pgid= -p "$pid" | tr -d ' ')" 2>/dev/null
+    done
+  done
+}
+
+stop_containers() {
+  docker compose -f nextdim-ai/local-stack/docker-compose.yml stop -t 3 >/dev/null 2>&1
+  docker compose -f nextdim-ai/docker-compose.local-mongo.yml stop -t 10 >/dev/null 2>&1
+}
+
+ensure_login "user login" "gcloud auth print-access-token" "gcloud auth login"
+ensure_login "application default credentials" "gcloud auth application-default print-access-token" "gcloud auth application-default login"
+clear_leftovers
+
+trap 'dekit down >/dev/null 2>&1; stop_containers' EXIT HUP INT TERM
+dekit

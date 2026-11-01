@@ -1,0 +1,111 @@
+# Full local stack for nextdim-ai, nextdim-ai-tool-server, nextdim-ai-internal and nextdim-dashboard.
+# Start: `dekit` from ~/Work-GitHub. Quit: `q`, then `q` again to stop everything.
+# Tasks start in dependency order; each waits for its deps' ready checks.
+
+defaults:
+  autostart: true
+  env:
+    PUBSUB_EMULATOR_HOST: localhost:8085
+
+tasks:
+  infra/:
+  infra/kb-proxy:
+    label: KB Proxy
+    cmd: cloud-sql-proxy nextdim-7d2e2:us-central1:nextdim-workflows --address 127.0.0.1 --port 5434
+    ready: {tcp: "127.0.0.1:5434"}
+  infra/internal-db-proxy:
+    label: Internal DB Proxy
+    cmd: cloud-sql-proxy nextdim-ai-internal:us-central1:nextdim-ai-internal --address 127.0.0.1 --port 5436
+    ready: {tcp: "127.0.0.1:5436"}
+  infra/mongo:
+    label: Mongo
+    cwd: nextdim-ai
+    cmd: docker compose -f docker-compose.local-mongo.yml up
+    ready:
+      cmd: ["sh", "-c", "[ \"$(docker inspect -f '{{.State.Health.Status}}' nextdim-ai-mongo-v2-1 2>/dev/null)\" = healthy ]"]
+    stop: {cmd: docker compose -f docker-compose.local-mongo.yml stop -t 10, timeout: 20s}
+  infra/pubsub:
+    label: Pub/Sub Emulator
+    cwd: nextdim-ai
+    cmd: docker compose -f local-stack/docker-compose.yml up
+    ready: {tcp: "localhost:8085"}
+    stop: {cmd: docker compose -f local-stack/docker-compose.yml stop -t 3, timeout: 15s}
+  infra/pubsub-topics:
+    label: Pub/Sub Topics
+    type: job
+    cwd: nextdim-ai
+    cmd: .venv/bin/python local-stack/provision_pubsub.py
+    deps: [infra/pubsub]
+  infra/ngrok:
+    label: ngrok Tunnel
+    cmd: ngrok http 9100 --url much-sprite-renter.ngrok-free.dev --log stdout
+
+  nextdim-ai/:
+  nextdim-ai/configurator:
+    label: Configurator
+    cwd: nextdim-ai
+    cmd: make run-configurator
+    log: {dir: logs, mode: truncate}
+    env:
+      CONFIGURATOR_SKIP_SCHEMA_ENSURE: "1"  # its BigQuery step writes to dev; Mongo indexes come from a one-off
+      ANALYTICS_ETL_ENABLED: "false"
+    deps: [infra/mongo, infra/pubsub-topics, infra/kb-proxy]
+    ready: {http: "http://localhost:9100/healthz"}
+  nextdim-ai/mcp-server:
+    label: MCP Server
+    cwd: nextdim-ai
+    cmd: make run-mcp-server
+    log: {dir: logs, mode: truncate}
+    deps: [infra/mongo, infra/pubsub-topics, infra/kb-proxy]
+    ready: {http: "http://localhost:9000/healthz"}
+  nextdim-ai/text-agent:
+    label: Text Agent
+    cwd: nextdim-ai
+    cmd: make run-text-server
+    env:
+      PORT: "8082"  # matches TEXT_AGENT_SERVICE_URL in .env; 8080 is the internal backend
+    deps: [infra/mongo, infra/pubsub-topics]
+    ready: {http: "http://localhost:8082/healthz"}
+  nextdim-ai/voice-agent:
+    label: Voice Agent
+    cwd: nextdim-ai
+    cmd: ["sh", "-c", "make run-voice-dev 2>&1 | cat"]  # the worker prints nothing when stdout is a TTY
+    log: {dir: logs, mode: truncate}
+    env:
+      PORT: "8091"  # hold server; its default 8080 is the internal backend
+    deps: [nextdim-ai/configurator, nextdim-ai/mcp-server]
+
+  tool-server/:
+  tool-server/tool-server:
+    label: Tool Server
+    cwd: nextdim-ai-tool-server
+    cmd:
+      - sh
+      - -c
+      - >-
+        TOOL_SERVER_API_KEY="$(grep '^MCP_API_KEY=' .env | tail -1 | cut -d= -f2-)"
+        exec .venv/bin/uvicorn mcp_server.app:create_app --factory
+        --host 0.0.0.0 --port 9001 --reload --reload-dir src
+    deps: [nextdim-ai/configurator]
+    ready: {http: "http://localhost:9001/healthz"}
+
+  internal/:
+  internal/backend:
+    label: Backend
+    cwd: nextdim-ai-internal/backend
+    cmd: uv run uvicorn app:app --host 0.0.0.0 --port 8080 --reload
+    deps: [infra/internal-db-proxy]
+    ready: {http: "http://localhost:8080/health"}
+  internal/frontend:
+    label: Frontend
+    cwd: nextdim-ai-internal/frontend/nextdim-ai-internal
+    cmd: npm run dev
+    ready: {http: "http://localhost:3000"}
+
+  nextdim-dashboard/:
+  nextdim-dashboard/web:
+    label: Dashboard
+    cwd: nextdim-dashboard
+    cmd: npm run dev
+    deps: [nextdim-ai/configurator]
+    ready: {http: "http://localhost:5180"}
