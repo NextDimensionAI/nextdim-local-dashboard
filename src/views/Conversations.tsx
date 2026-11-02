@@ -5,6 +5,7 @@ import { TableSkeletonRows } from "../components/Skeleton";
 import { UrgencyChip } from "../components/UrgencyChip";
 import { duration, humanize, personName, when } from "../format";
 import { navigate } from "../router";
+import { isUnfinished, UNFINISHED_POLL_MS } from "../useLiveStream";
 
 const PAGE_SIZE = 40;
 
@@ -23,6 +24,10 @@ export function Conversations({ tenant }: { tenant: string }) {
     },
     getNextPageParam: (last) => last.next_cursor || undefined,
     staleTime: 15_000,
+    refetchInterval: (q) => {
+      const now = Date.now();
+      return q.state.data?.pages.some((page) => page.items.some((row) => isUnfinished(row, now))) ? UNFINISHED_POLL_MS : false;
+    },
   });
 
   const rows = list.data?.pages.flatMap((page) => page.items) ?? [];

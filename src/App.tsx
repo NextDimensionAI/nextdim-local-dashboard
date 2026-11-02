@@ -59,7 +59,7 @@ export function App() {
           />
         </div>
       </nav>
-      <main className="content">
+      <main className={`content ${detailId && route !== "/live" ? "fill" : ""}`}>
         {route === "/live" ? <Live tenant={tenant} stream={stream} /> : detailId ? <ConversationDetail key={`${tenant}/${detailId}`} tenant={tenant} id={detailId} /> : <Conversations tenant={tenant} />}
       </main>
     </div>

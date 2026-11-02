@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API, api, type ConvEvent, type TokenResponse } from "./api";
 
@@ -25,6 +26,15 @@ export const STALE_AFTER_MS = 2 * 60 * 60 * 1000;
 
 export function isStale(call: LiveCall, now: number): boolean {
   return !call.endedAt && !!call.startedAt && now - new Date(call.startedAt).getTime() >= STALE_AFTER_MS;
+}
+
+const UNFINISHED_STATUSES = new Set(["active", "in_progress"]);
+// While a call is unfinished its row is re-read this often, until post-call writes the final status.
+export const UNFINISHED_POLL_MS = 10_000;
+
+export function isUnfinished(row: { call_status: string | null; call_start_time: string | null }, now: number): boolean {
+  if (!UNFINISHED_STATUSES.has(row.call_status ?? "")) return false;
+  return !row.call_start_time || now - new Date(row.call_start_time).getTime() < STALE_AFTER_MS;
 }
 
 export function liveCount(calls: Record<string, LiveCall>, now: number): number {
@@ -89,6 +99,7 @@ export function useLiveStream(tenant: string) {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
   const listeners = useRef(new Set<(callId: string, event: ConvEvent) => void>());
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     let source: EventSource | null = null;
@@ -147,6 +158,10 @@ export function useLiveStream(tenant: string) {
       if (type === "call_ended") {
         setCalls((prev) => (prev[id] ? { ...prev, [id]: { ...prev[id], endedAt: raw.ts ?? new Date().toISOString() } } : prev));
       }
+      if (type === "call_started" || type === "call_ended") {
+        queryClient.invalidateQueries({ queryKey: ["conversations", tenant] });
+        queryClient.invalidateQueries({ queryKey: ["conv", tenant, id] });
+      }
       const event = { ...toConvEvent(raw), type };
       for (const listener of listeners.current) listener(id, event);
     }
@@ -158,7 +173,7 @@ export function useLiveStream(tenant: string) {
       if (timer) clearTimeout(timer);
       source?.close();
     };
-  }, [tenant]);
+  }, [tenant, queryClient]);
 
   const subscribe = useCallback((listener: (callId: string, event: ConvEvent) => void) => {
     listeners.current.add(listener);

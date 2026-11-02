@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useRef, useState, type RefObject } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { api, type ConvEvent, type ConversationDetail as Detail, type LatencyTurn, type Page, type Task } from "../api";
 import { AudioPlayer, type AudioPlayerHandle } from "../components/AudioPlayer";
 import { CallLog } from "../components/CallLog";
@@ -9,11 +9,27 @@ import { Timeline } from "../components/Timeline";
 import { UrgencyChip } from "../components/UrgencyChip";
 import { duration, humanize, personName, when } from "../format";
 import { analyseRecording, speechStart } from "../recording";
+import { isUnfinished, UNFINISHED_POLL_MS } from "../useLiveStream";
 
 export function ConversationDetail({ tenant, id }: { tenant: string; id: string }) {
   const path = `/v1/conversations/${encodeURIComponent(id)}`;
 
-  const detail = useQuery({ queryKey: ["conv", tenant, id], queryFn: () => api<Detail>(path, tenant), staleTime: 30_000 });
+  const detail = useQuery({
+    queryKey: ["conv", tenant, id],
+    queryFn: () => api<Detail>(path, tenant),
+    staleTime: 30_000,
+    refetchInterval: (q) => (q.state.data && isUnfinished(q.state.data, Date.now()) ? UNFINISHED_POLL_MS : false),
+  });
+  const unfinished = !!detail.data && isUnfinished(detail.data, Date.now());
+  const queryClient = useQueryClient();
+  const wasUnfinished = useRef(false);
+  // Post-call writes tasks, latency and the final events when the call settles; re-read them once then.
+  useEffect(() => {
+    if (wasUnfinished.current && !unfinished) {
+      for (const key of ["events", "tasks", "latency"]) queryClient.invalidateQueries({ queryKey: [key, tenant, id] });
+    }
+    wasUnfinished.current = unfinished;
+  }, [unfinished, queryClient, tenant, id]);
   const events = useQuery({
     queryKey: ["events", tenant, id],
     queryFn: () => api<Page<ConvEvent>>(`${path}/events?limit=1000`, tenant),
@@ -50,7 +66,7 @@ export function ConversationDetail({ tenant, id }: { tenant: string; id: string 
   );
 
   return (
-    <section>
+    <section className="detail-page">
       <header className="page-head">
         <div>
           <a className="back" href="#/">← Conversations</a>
@@ -194,22 +210,117 @@ function TasksPanel({ tasks, loading }: { tasks: Task[]; loading: boolean }) {
         Tasks <span className="badge">{tasks.length}</span>
       </h2>
       {loading ? <LinesSkeleton lines={1} /> : tasks.length === 0 ? <p className="muted">None.</p> : null}
-      <ul className="plain tasks">
-        {tasks.map((t, i) => {
-          const status = t.status || t.task_status;
-          const details = t.summary || t.description || t.event_description;
-          return (
-            <li key={t.id ?? t._id ?? i}>
-              <strong>{humanize(t.title || t.task_type || t.patient_intent || t.tool_name || t.type || "Task")}</strong>
-              {status ? <span className="chip">{humanize(status)}</span> : null}
-              {t.urgency ? <UrgencyChip urgency={t.urgency} /> : null}
-              {details ? <p className="muted">{details}</p> : null}
-            </li>
-          );
-        })}
-      </ul>
+      <div className="tasks">
+        {tasks.map((t, i) => (
+          <TaskCard key={t.id ?? t._id ?? i} task={t} />
+        ))}
+      </div>
     </div>
   );
+}
+
+interface TaskField {
+  label: string;
+  keys: string[];
+  half?: boolean;
+  people?: boolean;
+  format?: (value: string) => string;
+}
+
+// task_information keys shown in this order; the rest follow under their own names.
+const TASK_FIELDS: TaskField[] = [
+  { label: "First Name", keys: ["first_name"], half: true },
+  { label: "Last Name", keys: ["last_name"], half: true },
+  { label: "Date of Birth", keys: ["dob"], format: usDate },
+  { label: "Priority", keys: ["task_priority"] },
+  { label: "Subject", keys: ["subject"] },
+  { label: "Description", keys: ["description"] },
+  { label: "Recipients", keys: ["recipient", "recipients"], people: true },
+  { label: "CC", keys: ["cc"], people: true },
+  { label: "Summary", keys: ["post_call_summary"] },
+];
+// Already shown in the card head or on the conversation itself.
+const TASK_HIDDEN = new Set(["call_status", "urgency", "task_status", "status"]);
+
+function TaskCard({ task: t }: { task: Task }) {
+  const status = t.status || t.task_status;
+  // task_information wins, but an empty value there doesn't hide the top-level fallback.
+  const info: Record<string, unknown> = {
+    first_name: t.patient_first_name,
+    last_name: t.patient_last_name,
+    dob: t.patient_dob,
+    subject: t.subject,
+    recipient: t.recipient,
+    description: t.description || t.summary || t.event_description,
+    ...Object.fromEntries(Object.entries(t.task_information ?? {}).filter(([, value]) => factValue(value))),
+  };
+  const known = new Set(TASK_FIELDS.flatMap((f) => f.keys));
+  const fields = [
+    ...TASK_FIELDS.map((f) => {
+      const values = f.keys.flatMap((key) => (f.people ? people(info[key]) : [factValue(info[key])])).filter(Boolean);
+      return { ...f, values: f.format ? values.map(f.format) : values };
+    }),
+    { label: "Intent", values: [factValue(t.patient_intent)] },
+    ...Object.entries(info)
+      .filter(([key]) => !known.has(key) && !TASK_HIDDEN.has(key))
+      .map(([key, value]) => ({ label: humanize(key), values: [factValue(value)] })),
+    ...Object.entries(t.information_collected ?? {}).map(([key, value]) => ({ label: humanize(key), values: [factValue(value)] })),
+    // The named fields always show, so an empty one reads as empty rather than missing.
+  ].filter((f) => "keys" in f || f.values.some(Boolean));
+
+  return (
+    <div className="task-card">
+      <div className="task-card-head">
+        <strong>{humanize(t.title || t.task_type || t.patient_intent || t.tool_name || t.type || "Task")}</strong>
+        {status ? <span className="chip">{humanize(status)}</span> : null}
+        {t.urgency ? <UrgencyChip urgency={t.urgency} /> : null}
+      </div>
+      <div className="task-fields">
+        {fields.map((f, i) => (
+          <div key={`${f.label}-${i}`} className={`task-field ${"half" in f && f.half ? "half" : ""}`}>
+            <div className="task-field-label">{f.label}</div>
+            {!f.values.some(Boolean) ? (
+              <div className="task-field-value muted">—</div>
+            ) : "people" in f && f.people ? (
+              <div className="chips">
+                {f.values.map((name, j) => (
+                  <span key={j} className="person">
+                    {name}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div className="task-field-value">{f.values.join(", ")}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Recipients and CC arrive as names, emails or {name, email} records. */
+function people(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(people);
+  if (value && typeof value === "object" && ("name" in value || "email" in value)) {
+    const p = value as { name?: unknown; email?: unknown };
+    return [factValue(p.name) || factValue(p.email)].filter(Boolean);
+  }
+  return [factValue(value)].filter(Boolean);
+}
+
+// The API sends dates as YYYY-MM-DD; staff read them as MM/DD/YYYY.
+function usDate(value: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : value;
+}
+
+function factValue(value: unknown): string {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) return value.map(factValue).filter(Boolean).join(", ");
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "object") return Object.keys(value).length ? JSON.stringify(value) : "";
+  return String(value).trim();
 }
 
 // Transcript events land when a turn ends, so each turn is placed at the first speech in the

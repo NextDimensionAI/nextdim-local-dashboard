@@ -120,6 +120,13 @@ export interface Task {
   tool_name?: string | null;
   event_description?: string | null;
   patient_intent?: string | null;
+  subject?: string | null;
+  recipient?: string | null;
+  patient_first_name?: string | null;
+  patient_last_name?: string | null;
+  patient_dob?: string | null;
+  task_information?: Record<string, unknown> | null;
+  information_collected?: Record<string, unknown> | null;
 }
 
 export interface TokenResponse {
