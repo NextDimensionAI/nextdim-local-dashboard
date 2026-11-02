@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { api, type ConvEvent, type ConversationDetail as Detail, type LatencyTurn, type Page, type Task } from "../api";
 import { AudioPlayer, type AudioPlayerHandle } from "../components/AudioPlayer";
 import { CallLog } from "../components/CallLog";
+import { CopyTranscriptMenu } from "../components/CopyTranscriptMenu";
 import { EventLog } from "../components/EventLog";
 import { LinesSkeleton, Skeleton, SkeletonText, TimelineSkeleton } from "../components/Skeleton";
 import { Timeline } from "../components/Timeline";
@@ -166,6 +167,7 @@ function CallTabs({ tenant, conversationId, events, loading, callStart, origin, 
             </button>
           ))}
         </div>
+        {tab === "transcript" && !loading ? <CopyTranscriptMenu events={transcript} origin={origin} starts={starts} /> : null}
       </div>
       {tab === "logs" ? (
         <CallLog tenant={tenant} conversationId={conversationId} />

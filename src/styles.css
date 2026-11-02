@@ -89,6 +89,14 @@ p { margin: 6px 0; }
 .menu-item.active { background: var(--surface-2); }
 .menu-item.selected { color: var(--accent); font-weight: 500; }
 .menu-check { color: var(--accent); }
+button.menu-item { width: 100%; border: 0; background: none; font: inherit; color: inherit; text-align: left; white-space: nowrap; }
+button.menu-item:hover, button.menu-item:focus-visible { background: var(--surface-2); outline: none; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer;
+}
+.icon-btn:hover, .icon-btn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
+.icon-btn:disabled { opacity: 0.5; cursor: default; }
 
 .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; }
 .table { width: 100%; border-collapse: collapse; }
